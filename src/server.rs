@@ -314,10 +314,7 @@ impl Server {
     /// Login to a generic account by token
     pub fn log_on(&self, token: &CStr) {
         unsafe {
-            sys::SteamAPI_ISteamGameServer_LogOn(
-                self.server,
-                token.as_ptr()
-            );
+            sys::SteamAPI_ISteamGameServer_LogOn(self.server, token.as_ptr());
         }
     }
 
@@ -368,11 +365,10 @@ impl Server {
         let value = CString::new(value)?;
 
         unsafe {
-            Ok(
-                sys::SteamAPI_ISteamGameServer_SetKeyValue(
-                    self.server,
-                    key.as_ptr(),
-                    value.as_ptr()
+            Ok(sys::SteamAPI_ISteamGameServer_SetKeyValue(
+                self.server,
+                key.as_ptr(),
+                value.as_ptr(),
             ))
         }
     }
@@ -380,17 +376,16 @@ impl Server {
     pub fn set_game_tags(&self, tags: &str) -> Option<()> {
         let tags = tags.as_bytes();
         if tags.len() >= 128 {
-            return None
+            return None;
         }
 
         let mut tags_buffer = [0u8; 128];
         tags_buffer.copy_from_slice(tags);
 
         unsafe {
-            Some(
-                sys::SteamAPI_ISteamGameServer_SetGameTags(
-                    self.server,
-                    tags_buffer.as_ptr().cast()
+            Some(sys::SteamAPI_ISteamGameServer_SetGameTags(
+                self.server,
+                tags_buffer.as_ptr().cast(),
             ))
         }
     }
