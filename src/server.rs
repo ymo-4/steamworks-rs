@@ -379,10 +379,12 @@ impl Server {
             return None;
         }
 
-        let mut tags_buffer = [0u8; 128];
-        tags_buffer.copy_from_slice(tags);
-
         unsafe {
+            let mut tags_buffer = [0u8; 128];
+            tags_buffer
+                .as_mut_ptr()
+                .copy_from(tags.as_ptr(), tags.len());
+
             Some(sys::SteamAPI_ISteamGameServer_SetGameTags(
                 self.server,
                 tags_buffer.as_ptr().cast(),
