@@ -5,6 +5,7 @@ extern crate bitflags;
 #[macro_use]
 extern crate lazy_static;
 
+use screenshots::Screenshots;
 #[cfg(feature = "raw-bindings")]
 pub use steamworks_sys as sys;
 #[cfg(not(feature = "raw-bindings"))]
@@ -53,6 +54,7 @@ pub mod networking_types;
 pub mod networking_utils;
 mod remote_play;
 mod remote_storage;
+pub mod screenshots;
 mod server;
 mod ugc;
 mod user;
@@ -143,7 +145,6 @@ impl Client<ClientManager> {
         let versions: Vec<&[u8]> = vec![
             sys::STEAMUTILS_INTERFACE_VERSION,
             sys::STEAMNETWORKINGUTILS_INTERFACE_VERSION,
-            sys::STEAMAPPLIST_INTERFACE_VERSION,
             sys::STEAMAPPS_INTERFACE_VERSION,
             sys::STEAMCONTROLLER_INTERFACE_VERSION,
             sys::STEAMFRIENDS_INTERFACE_VERSION,
@@ -446,6 +447,18 @@ impl<Manager> Client<Manager> {
                 rs,
                 util,
                 inner: self.inner.clone(),
+            }
+        }
+    }
+
+    /// Returns an accessor to the steam screenshots interface
+    pub fn screenshots(&self) -> Screenshots<Manager> {
+        unsafe {
+            let screenshots = sys::SteamAPI_SteamScreenshots_v003();
+            debug_assert!(!screenshots.is_null());
+            Screenshots {
+                screenshots,
+                _inner: self.inner.clone(),
             }
         }
     }
