@@ -361,16 +361,20 @@ impl Server {
         }
     }
 
-    pub fn set_key_value(&self, key: String, value: String) -> Result<(), std::ffi::NulError> {
-        let key = CString::new(key)?;
-        let value = CString::new(value)?;
+    /// Add/update a rules key/value pair.
+    pub fn set_key_value(&self, key: &str, value: &str) {
+        let key = CString::new(key).unwrap();
+        let value = CString::new(value).unwrap();
 
         unsafe {
-            Ok(sys::SteamAPI_ISteamGameServer_SetKeyValue(
-                self.server,
-                key.as_ptr(),
-                value.as_ptr(),
-            ))
+            sys::SteamAPI_ISteamGameServer_SetKeyValue(self.server, key.as_ptr(), value.as_ptr());
+        }
+    }
+
+    /// Clears the whole list of key/values that are sent in rules queries.
+    pub fn clear_all_key_values(&self) {
+        unsafe {
+            sys::SteamAPI_ISteamGameServer_ClearAllKeyValues(self.server);
         }
     }
 
