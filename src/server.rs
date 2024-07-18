@@ -312,7 +312,8 @@ impl Server {
     }
 
     /// Login to a generic account by token
-    pub fn log_on(&self, token: &CStr) {
+    pub fn log_on(&self, token: &str) {
+        let token = CString::new(token).unwrap();
         unsafe {
             sys::SteamAPI_ISteamGameServer_LogOn(self.server, token.as_ptr());
         }
