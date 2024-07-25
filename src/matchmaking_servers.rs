@@ -16,6 +16,7 @@ macro_rules! matchmaking_servers_callback {
     ) => {
         paste::item! {
             $(
+                #[allow(unused_variables)]
                 extern fn [<$name:lower _ $fn_name _virtual>]($self: *mut [<$name CallbacksReal>] $(, $fn_arg_name: $cpp_fn_arg)*) {
                     unsafe {
                         $(
@@ -110,31 +111,60 @@ macro_rules! gen_server_list_fn {
             filters: &HashMap<&str, &str>,
             callbacks: ServerListCallbacks,
         ) -> Option<Arc<Mutex<ServerListRequest>>> {
-            unsafe {
-                let app_id = app_id.into().0;
+            let app_id = app_id.into().0;
+            let mut filters = {
+                let mut vec = Vec::with_capacity(filters.len());
+                for i in filters {
+                    let key_bytes = i.0.as_bytes();
+                    let value_bytes = i.1.as_bytes();
 
-                let mut filters = create_filters(filters)?;
+                    // Max length is 255, so 256th byte will always be nul-terminator
+                    if key_bytes.len() >= 256 || value_bytes.len() >= 256 {
+                        return None;
+                    }
+
+                    let mut key = [0i8; 256];
+                    let mut value = [0i8; 256];
+
+                    unsafe {
+                        key.as_mut_ptr()
+                            .copy_from(key_bytes.as_ptr().cast(), key_bytes.len());
+                        value
+                            .as_mut_ptr()
+                            .copy_from(value_bytes.as_ptr().cast(), value_bytes.len());
+                    }
+
+                    vec.push(sys::MatchMakingKeyValuePair_t {
+                        m_szKey: key,
+                        m_szValue: value,
+                    });
+                }
+                vec.shrink_to_fit();
+
+                vec
+            };
+
+            unsafe {
                 let callbacks = create_serverlist(callbacks);
 
-                let arc = Arc::clone(&(*(*callbacks).rust_callbacks).req);
-                let mut req = arc.lock().unwrap();
+                let request_arc = ServerListRequest::get(callbacks);
+                let mut request = request_arc.lock().unwrap();
 
-                let handle = steamworks_sys::$sys_method(
+                let handle = sys::$sys_method(
                     self.mms,
                     app_id,
-                    &mut filters.0,
-                    filters.1.try_into().unwrap(),
+                    &mut filters.as_mut_ptr() as *mut *mut _,
+                    filters.len().try_into().unwrap(),
                     callbacks.cast(),
                 );
 
-                req.mms = self.mms;
-                req.real = callbacks;
-                req.filters = filters;
-                req.h_req = handle;
+                request.mms = self.mms;
+                request.real = callbacks;
+                request.h_req = handle;
 
-                drop(req);
+                drop(request);
 
-                Some(arc)
+                Some(request_arc)
             }
         }
     };
@@ -164,45 +194,43 @@ pub struct GameServerItem {
 }
 
 impl GameServerItem {
-    fn from_ptr(raw: *const steamworks_sys::gameserveritem_t) -> Self {
-        unsafe {
-            let raw = *raw;
-            Self {
-                appid: raw.m_nAppID,
-                players: raw.m_nPlayers,
-                bot_players: raw.m_nBotPlayers,
-                ping: raw.m_nPing,
-                max_players: raw.m_nMaxPlayers,
-                server_version: raw.m_nServerVersion,
-                steamid: raw.m_steamID.m_steamid.m_unAll64Bits,
+    unsafe fn from_ptr(raw: *const sys::gameserveritem_t) -> Self {
+        let raw = *raw;
+        Self {
+            appid: raw.m_nAppID,
+            players: raw.m_nPlayers,
+            bot_players: raw.m_nBotPlayers,
+            ping: raw.m_nPing,
+            max_players: raw.m_nMaxPlayers,
+            server_version: raw.m_nServerVersion,
+            steamid: raw.m_steamID.m_steamid.m_unAll64Bits,
 
-                do_not_refresh: raw.m_bDoNotRefresh,
-                successful_response: raw.m_bHadSuccessfulResponse,
-                have_password: raw.m_bPassword,
-                secure: raw.m_bSecure,
+            do_not_refresh: raw.m_bDoNotRefresh,
+            successful_response: raw.m_bHadSuccessfulResponse,
+            have_password: raw.m_bPassword,
+            secure: raw.m_bSecure,
 
-                addr: Ipv4Addr::from(raw.m_NetAdr.m_unIP),
-                query_port: raw.m_NetAdr.m_usQueryPort,
-                connection_port: raw.m_NetAdr.m_usConnectionPort,
+            addr: Ipv4Addr::from(raw.m_NetAdr.m_unIP),
+            query_port: raw.m_NetAdr.m_usQueryPort,
+            connection_port: raw.m_NetAdr.m_usConnectionPort,
 
-                game_description: CStr::from_ptr(raw.m_szGameDescription.as_ptr())
-                    .to_string_lossy()
-                    .into_owned(),
-                server_name: CStr::from_ptr(raw.m_szServerName.as_ptr())
-                    .to_string_lossy()
-                    .into_owned(),
-                game_dir: CStr::from_ptr(raw.m_szGameDir.as_ptr())
-                    .to_string_lossy()
-                    .into_owned(),
-                map: CStr::from_ptr(raw.m_szMap.as_ptr())
-                    .to_string_lossy()
-                    .into_owned(),
-                tags: CStr::from_ptr(raw.m_szGameTags.as_ptr())
-                    .to_string_lossy()
-                    .into_owned(),
+            game_description: CStr::from_ptr(raw.m_szGameDescription.as_ptr())
+                .to_string_lossy()
+                .into_owned(),
+            server_name: CStr::from_ptr(raw.m_szServerName.as_ptr())
+                .to_string_lossy()
+                .into_owned(),
+            game_dir: CStr::from_ptr(raw.m_szGameDir.as_ptr())
+                .to_string_lossy()
+                .into_owned(),
+            map: CStr::from_ptr(raw.m_szMap.as_ptr())
+                .to_string_lossy()
+                .into_owned(),
+            tags: CStr::from_ptr(raw.m_szGameTags.as_ptr())
+                .to_string_lossy()
+                .into_owned(),
 
-                last_time_played: Duration::from_secs(raw.m_ulTimeLastPlayed.into()),
-            }
+            last_time_played: Duration::from_secs(raw.m_ulTimeLastPlayed.into()),
         }
     }
 }
@@ -211,7 +239,7 @@ matchmaking_servers_callback!(
     Ping;
     _self;
     ();
-    responded({}): (info: *const steamworks_sys::gameserveritem_t => GameServerItem where { GameServerItem::from_ptr(info) }),
+    responded({}): (info: *const sys::gameserveritem_t => GameServerItem where { GameServerItem::from_ptr(info) }),
     failed({ free_ping(_self) }): ()
 );
 
@@ -250,20 +278,19 @@ matchmaking_servers_callback!(
                 released: false,
                 mms: ptr::null_mut(),
                 real: ptr::null_mut(),
-                filters: (std::ptr::null_mut(), 0),
             }))
         }
     );
     responded({}): (
-        request: steamworks_sys::HServerListRequest => Arc<Mutex<ServerListRequest>> where { ServerListRequest::get(_self, request) },
+        request: sys::HServerListRequest => Arc<Mutex<ServerListRequest>> where { ServerListRequest::get(_self) },
         server: i32 => i32 where {server}
     ),
     failed({}): (
-        request: steamworks_sys::HServerListRequest => Arc<Mutex<ServerListRequest>> where { ServerListRequest::get(_self, request) },
+        request: sys::HServerListRequest => Arc<Mutex<ServerListRequest>> where { ServerListRequest::get(_self) },
         server: i32 => i32 where {server}
     ),
     refresh_complete({}): (
-        request: steamworks_sys::HServerListRequest => Arc<Mutex<ServerListRequest>> where { ServerListRequest::get(_self, request) },
+        request: sys::HServerListRequest => Arc<Mutex<ServerListRequest>> where { ServerListRequest::get(_self) },
         response: ServerResponse => ServerResponse where {response}
     )
 );
@@ -277,18 +304,14 @@ pub enum ServerResponse {
 }
 
 pub struct ServerListRequest {
-    pub(self) h_req: steamworks_sys::HServerListRequest,
+    pub(self) h_req: sys::HServerListRequest,
     pub(self) released: bool,
     pub(self) mms: *mut sys::ISteamMatchmakingServers,
     pub(self) real: *mut ServerListCallbacksReal,
-    pub(self) filters: (*mut steamworks_sys::MatchMakingKeyValuePair_t, usize),
 }
 
 impl ServerListRequest {
-    pub(self) unsafe fn get(
-        _self: *mut ServerListCallbacksReal,
-        _request: steamworks_sys::HServerListRequest,
-    ) -> Arc<Mutex<Self>> {
+    pub(self) unsafe fn get(_self: *mut ServerListCallbacksReal) -> Arc<Mutex<Self>> {
         let rust_callbacks = &*(*_self).rust_callbacks;
         Arc::clone(&rust_callbacks.req)
     }
@@ -309,11 +332,7 @@ impl ServerListRequest {
             }
 
             self.released = true;
-            steamworks_sys::SteamAPI_ISteamMatchmakingServers_ReleaseRequest(self.mms, self.h_req);
-
-            if !self.filters.0.is_null() {
-                free_filters(self.filters.0, self.filters.1);
-            }
+            sys::SteamAPI_ISteamMatchmakingServers_ReleaseRequest(self.mms, self.h_req);
 
             free_serverlist(self.real);
         }
@@ -334,11 +353,9 @@ impl ServerListRequest {
         unsafe {
             self.released()?;
 
-            Some(
-                steamworks_sys::SteamAPI_ISteamMatchmakingServers_GetServerCount(
-                    self.mms, self.h_req,
-                ),
-            )
+            Some(sys::SteamAPI_ISteamMatchmakingServers_GetServerCount(
+                self.mms, self.h_req,
+            ))
         }
     }
 
@@ -350,7 +367,7 @@ impl ServerListRequest {
             self.released()?;
 
             // Should we then free this pointer?
-            let server_item = steamworks_sys::SteamAPI_ISteamMatchmakingServers_GetServerDetails(
+            let server_item = sys::SteamAPI_ISteamMatchmakingServers_GetServerDetails(
                 self.mms, self.h_req, server,
             );
 
@@ -365,7 +382,7 @@ impl ServerListRequest {
         unsafe {
             self.released()?;
 
-            steamworks_sys::SteamAPI_ISteamMatchmakingServers_RefreshQuery(self.mms, self.h_req);
+            sys::SteamAPI_ISteamMatchmakingServers_RefreshQuery(self.mms, self.h_req);
 
             Some(())
         }
@@ -378,9 +395,7 @@ impl ServerListRequest {
         unsafe {
             self.released()?;
 
-            steamworks_sys::SteamAPI_ISteamMatchmakingServers_RefreshServer(
-                self.mms, self.h_req, server,
-            );
+            sys::SteamAPI_ISteamMatchmakingServers_RefreshServer(self.mms, self.h_req, server);
 
             Some(())
         }
@@ -393,51 +408,11 @@ impl ServerListRequest {
         unsafe {
             self.released()?;
 
-            Some(
-                steamworks_sys::SteamAPI_ISteamMatchmakingServers_IsRefreshing(
-                    self.mms, self.h_req,
-                ),
-            )
+            Some(sys::SteamAPI_ISteamMatchmakingServers_IsRefreshing(
+                self.mms, self.h_req,
+            ))
         }
     }
-}
-
-unsafe fn create_filters(
-    map: &HashMap<&str, &str>,
-) -> Option<(*mut steamworks_sys::MatchMakingKeyValuePair_t, usize)> {
-    let mut vec = Vec::with_capacity(map.len());
-    for i in map {
-        let key_bytes = i.0.as_bytes();
-        let value_bytes = i.1.as_bytes();
-
-        // Max length is 255, so 256th byte will always be nul-terminator
-        if key_bytes.len() >= 256 || value_bytes.len() >= 256 {
-            return None;
-        }
-
-        let mut key = [0i8; 256];
-        let mut value = [0i8; 256];
-
-        key.as_mut_ptr()
-            .copy_from(key_bytes.as_ptr().cast(), key_bytes.len());
-        value
-            .as_mut_ptr()
-            .copy_from(value_bytes.as_ptr().cast(), value_bytes.len());
-
-        vec.push(steamworks_sys::MatchMakingKeyValuePair_t {
-            m_szKey: key,
-            m_szValue: value,
-        });
-    }
-    vec.shrink_to_fit();
-    let filters = (vec.as_mut_ptr(), vec.len());
-    std::mem::forget(vec);
-
-    Some(filters)
-}
-
-unsafe fn free_filters(ptr: *mut steamworks_sys::MatchMakingKeyValuePair_t, count: usize) {
-    drop(Vec::from_raw_parts(ptr, count, count))
 }
 
 /// Access to the steam MatchmakingServers interface
@@ -451,7 +426,7 @@ impl<Manager> MatchmakingServers<Manager> {
         unsafe {
             let callbacks = create_ping(callbacks);
 
-            steamworks_sys::SteamAPI_ISteamMatchmakingServers_PingServer(
+            sys::SteamAPI_ISteamMatchmakingServers_PingServer(
                 self.mms,
                 ip.into(),
                 port,
@@ -469,7 +444,7 @@ impl<Manager> MatchmakingServers<Manager> {
         unsafe {
             let callbacks = create_playerdetails(callbacks);
 
-            steamworks_sys::SteamAPI_ISteamMatchmakingServers_PlayerDetails(
+            sys::SteamAPI_ISteamMatchmakingServers_PlayerDetails(
                 self.mms,
                 ip.into(),
                 port,
@@ -482,7 +457,7 @@ impl<Manager> MatchmakingServers<Manager> {
         unsafe {
             let callbacks = create_serverrules(callbacks);
 
-            steamworks_sys::SteamAPI_ISteamMatchmakingServers_ServerRules(
+            sys::SteamAPI_ISteamMatchmakingServers_ServerRules(
                 self.mms,
                 ip.into(),
                 port,
@@ -511,7 +486,7 @@ impl<Manager> MatchmakingServers<Manager> {
             let arc = Arc::clone(&(*(*callbacks).rust_callbacks).req);
             let mut req = arc.lock().unwrap();
 
-            let handle = steamworks_sys::SteamAPI_ISteamMatchmakingServers_RequestLANServerList(
+            let handle = sys::SteamAPI_ISteamMatchmakingServers_RequestLANServerList(
                 self.mms,
                 app_id,
                 callbacks.cast(),
@@ -519,8 +494,6 @@ impl<Manager> MatchmakingServers<Manager> {
 
             req.mms = self.mms;
             req.real = callbacks;
-            // No filters here, leaving defaults. Then check its in ServerListRequest::release
-            // req.filters = filters;
             req.h_req = handle;
 
             drop(req);
@@ -573,7 +546,8 @@ fn test_internet_servers() {
     map.insert("map", "PEI");
     let _ = client
         .matchmaking_servers()
-        .internet_server_list(304930, &map, callbacks);
+        .internet_server_list(304930, &map, callbacks)
+        .unwrap();
 
     for _ in 0..2000 {
         single.run_callbacks();
