@@ -273,22 +273,33 @@ matchmaking_servers_callback!(
                 released: Cell::new(false),
                 mms: Cell::new(ptr::null_mut()),
                 real: Cell::new(ptr::null_mut()),
+                called_in: Cell::new(CalledIn::None),
             })
         }
     );
     responded({}): (
-        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request) },
+        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request, CalledIn::Responded) },
         server: i32 => i32 where {server}
     ),
     failed({}): (
-        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request) },
+        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request, CalledIn::Failed) },
         server: i32 => i32 where {server}
     ),
-    refresh_complete({}): (
-        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request) },
+    refresh_complete({ history_prefree(_self) }): (
+        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request, CalledIn::RefreshComplete) },
         response: ServerResponse => ServerResponse where {response}
     )
 );
+
+unsafe fn history_prefree(_self: *mut ServerListCallbacksReal) {
+    let rc = ServerListRequest::get_unchecked(_self);
+    if !rc
+        .is_refreshing()
+        .expect("This shouldn't panic. But if it's - make an issue")
+    {
+        rc.release_unchecked();
+    }
+}
 
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -298,11 +309,39 @@ pub enum ServerResponse {
     NoServersListedOnMasterServer = 2,
 }
 
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+enum CalledIn {
+    Responded,
+    Failed,
+    RefreshComplete,
+
+    None,
+}
+
+impl CalledIn {
+    /// ```no_rust
+    /// Responded, Failed -> true
+    /// RefreshComplete -> false
+    /// None -> panic!
+    /// ```
+    fn is_default(&self) -> bool {
+        let val = *self;
+        if val == Self::Responded || val == Self::Failed {
+            true
+        } else if val == Self::RefreshComplete {
+            false
+        } else {
+            panic!("Should never be called on None. Go to github and make an issue!")
+        }
+    }
+}
+
 pub struct ServerListRequest {
     pub(self) released: Cell<bool>,
     pub(self) h_req: Cell<sys::HServerListRequest>,
     pub(self) mms: Cell<*mut sys::ISteamMatchmakingServers>,
     pub(self) real: Cell<*mut ServerListCallbacksReal>,
+    pub(self) called_in: Cell<CalledIn>,
 }
 
 impl ServerListRequest {
@@ -314,8 +353,10 @@ impl ServerListRequest {
     pub(self) unsafe fn get(
         _self: *mut ServerListCallbacksReal,
         request: sys::HServerListRequest,
+        called_in: CalledIn,
     ) -> Rc<Self> {
         let rc = Self::get_unchecked(_self);
+        rc.called_in.set(called_in);
 
         // In case callback is called faster then function set h_req.
         // Just in case, chance of that is very low.
@@ -337,15 +378,19 @@ impl ServerListRequest {
     /// called will always result in `None`
     pub fn release(&self) {
         unsafe {
-            if self.released.get() {
+            if self.released.get() || !self.called_in.get().is_default() {
                 return;
             }
 
-            self.released.set(true);
-            sys::SteamAPI_ISteamMatchmakingServers_ReleaseRequest(self.mms.get(), self.h_req.get());
-
-            free_serverlist(self.real.get());
+            self.release_unchecked();
         }
+    }
+
+    pub(self) unsafe fn release_unchecked(&self) {
+        self.released.set(true);
+        sys::SteamAPI_ISteamMatchmakingServers_ReleaseRequest(self.mms.get(), self.h_req.get());
+
+        free_serverlist(self.real.get());
     }
 
     fn released(&self) -> Option<()> {
@@ -542,10 +587,10 @@ fn test_internet_servers() {
             *data.lock().unwrap() += 1;
         }),
         Box::new(move |_list, _server| {
+            println!("failed");
             *data2.lock().unwrap() += 1;
         }),
         Box::new(move |list, _response| {
-            list.release();
             println!("{}", data3.lock().unwrap());
         }),
     );
@@ -557,7 +602,7 @@ fn test_internet_servers() {
         .internet_server_list(304930, &map, callbacks)
         .unwrap();
 
-    for _ in 0..2000 {
+    for _ in 0..3000 {
         single.run_callbacks();
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
