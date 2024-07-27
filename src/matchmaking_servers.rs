@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::net::Ipv4Addr;
 use std::ptr;
 use std::rc::Rc;
@@ -16,7 +17,6 @@ macro_rules! matchmaking_servers_callback {
     ) => {
         paste::item! {
             $(
-                #[allow(unused_variables)]
                 extern fn [<$name:lower _ $fn_name _virtual>]($self: *mut [<$name CallbacksReal>] $(, $fn_arg_name: $cpp_fn_arg)*) {
                     unsafe {
                         $(
@@ -41,7 +41,6 @@ macro_rules! matchmaking_servers_callback {
             }
 
             impl [<$name Callbacks>] {
-                // Arc can also be here, without Box
                 pub fn new($($fn_name: Box<dyn Fn($($rust_fn_arg),*)>),*) -> Self {
                     Self {
                         $($fn_name: Rc::new($fn_name),)*
@@ -104,13 +103,13 @@ macro_rules! gen_server_list_fn {
         ///
         /// # Errors
         ///
-        /// Every filter's key and value must take 255 bytes or under, otherwise `None` is returned.
+        /// Every filter's key and value must take 255 bytes or under, otherwise `Err` is returned.
         pub fn $name<ID: Into<AppId>>(
             &self,
             app_id: ID,
             filters: &HashMap<&str, &str>,
             callbacks: ServerListCallbacks,
-        ) -> Option<Arc<Mutex<ServerListRequest>>> {
+        ) -> Result<(), ()> {
             let app_id = app_id.into().0;
             let mut filters = {
                 let mut vec = Vec::with_capacity(filters.len());
@@ -120,7 +119,7 @@ macro_rules! gen_server_list_fn {
 
                     // Max length is 255, so 256th byte will always be nul-terminator
                     if key_bytes.len() >= 256 || value_bytes.len() >= 256 {
-                        return None;
+                        return Err(());
                     }
 
                     let mut key = [0i8; 256];
@@ -147,8 +146,9 @@ macro_rules! gen_server_list_fn {
             unsafe {
                 let callbacks = create_serverlist(callbacks);
 
-                let request_arc = ServerListRequest::get(callbacks);
-                let mut request = request_arc.lock().unwrap();
+                let request = ServerListRequest::get_unchecked(callbacks);
+                request.mms.set(self.mms);
+                request.real.set(callbacks);
 
                 let handle = sys::$sys_method(
                     self.mms,
@@ -157,15 +157,10 @@ macro_rules! gen_server_list_fn {
                     filters.len().try_into().unwrap(),
                     callbacks.cast(),
                 );
-
-                request.mms = self.mms;
-                request.real = callbacks;
-                request.h_req = handle;
-
-                drop(request);
-
-                Some(request_arc)
+                request.h_req.set(handle);
             }
+
+            Ok(())
         }
     };
 }
@@ -272,25 +267,25 @@ matchmaking_servers_callback!(
     ServerList;
     _self;
     (
-        req: Arc<Mutex<ServerListRequest>> where {
-            Arc::new(Mutex::new(ServerListRequest {
-                h_req: ptr::null_mut(),
-                released: false,
-                mms: ptr::null_mut(),
-                real: ptr::null_mut(),
-            }))
+        req: Rc<ServerListRequest> where {
+            Rc::new(ServerListRequest {
+                h_req: Cell::new(ptr::null_mut()),
+                released: Cell::new(false),
+                mms: Cell::new(ptr::null_mut()),
+                real: Cell::new(ptr::null_mut()),
+            })
         }
     );
     responded({}): (
-        request: sys::HServerListRequest => Arc<Mutex<ServerListRequest>> where { ServerListRequest::get(_self) },
+        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request) },
         server: i32 => i32 where {server}
     ),
     failed({}): (
-        request: sys::HServerListRequest => Arc<Mutex<ServerListRequest>> where { ServerListRequest::get(_self) },
+        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request) },
         server: i32 => i32 where {server}
     ),
     refresh_complete({}): (
-        request: sys::HServerListRequest => Arc<Mutex<ServerListRequest>> where { ServerListRequest::get(_self) },
+        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request) },
         response: ServerResponse => ServerResponse where {response}
     )
 );
@@ -304,16 +299,31 @@ pub enum ServerResponse {
 }
 
 pub struct ServerListRequest {
-    pub(self) h_req: sys::HServerListRequest,
-    pub(self) released: bool,
-    pub(self) mms: *mut sys::ISteamMatchmakingServers,
-    pub(self) real: *mut ServerListCallbacksReal,
+    pub(self) released: Cell<bool>,
+    pub(self) h_req: Cell<sys::HServerListRequest>,
+    pub(self) mms: Cell<*mut sys::ISteamMatchmakingServers>,
+    pub(self) real: Cell<*mut ServerListCallbacksReal>,
 }
 
 impl ServerListRequest {
-    pub(self) unsafe fn get(_self: *mut ServerListCallbacksReal) -> Arc<Mutex<Self>> {
+    pub(self) unsafe fn get_unchecked(_self: *mut ServerListCallbacksReal) -> Rc<Self> {
         let rust_callbacks = &*(*_self).rust_callbacks;
-        Arc::clone(&rust_callbacks.req)
+        Rc::clone(&rust_callbacks.req)
+    }
+
+    pub(self) unsafe fn get(
+        _self: *mut ServerListCallbacksReal,
+        request: sys::HServerListRequest,
+    ) -> Rc<Self> {
+        let rc = Self::get_unchecked(_self);
+
+        // In case callback is called faster then function set h_req.
+        // Just in case, chance of that is very low.
+        if rc.h_req.get().is_null() {
+            rc.h_req.set(request);
+        }
+
+        rc
     }
 
     /// # Usage
@@ -325,21 +335,21 @@ impl ServerListRequest {
     ///
     /// Further using methods on this request after `release`
     /// called will always result in `None`
-    pub fn release(&mut self) {
+    pub fn release(&self) {
         unsafe {
-            if self.released {
+            if self.released.get() {
                 return;
             }
 
-            self.released = true;
-            sys::SteamAPI_ISteamMatchmakingServers_ReleaseRequest(self.mms, self.h_req);
+            self.released.set(true);
+            sys::SteamAPI_ISteamMatchmakingServers_ReleaseRequest(self.mms.get(), self.h_req.get());
 
-            free_serverlist(self.real);
+            free_serverlist(self.real.get());
         }
     }
 
     fn released(&self) -> Option<()> {
-        if self.released {
+        if self.released.get() {
             None
         } else {
             Some(())
@@ -354,7 +364,8 @@ impl ServerListRequest {
             self.released()?;
 
             Some(sys::SteamAPI_ISteamMatchmakingServers_GetServerCount(
-                self.mms, self.h_req,
+                self.mms.get(),
+                self.h_req.get(),
             ))
         }
     }
@@ -368,7 +379,9 @@ impl ServerListRequest {
 
             // Should we then free this pointer?
             let server_item = sys::SteamAPI_ISteamMatchmakingServers_GetServerDetails(
-                self.mms, self.h_req, server,
+                self.mms.get(),
+                self.h_req.get(),
+                server,
             );
 
             Some(GameServerItem::from_ptr(server_item))
@@ -382,7 +395,7 @@ impl ServerListRequest {
         unsafe {
             self.released()?;
 
-            sys::SteamAPI_ISteamMatchmakingServers_RefreshQuery(self.mms, self.h_req);
+            sys::SteamAPI_ISteamMatchmakingServers_RefreshQuery(self.mms.get(), self.h_req.get());
 
             Some(())
         }
@@ -395,7 +408,11 @@ impl ServerListRequest {
         unsafe {
             self.released()?;
 
-            sys::SteamAPI_ISteamMatchmakingServers_RefreshServer(self.mms, self.h_req, server);
+            sys::SteamAPI_ISteamMatchmakingServers_RefreshServer(
+                self.mms.get(),
+                self.h_req.get(),
+                server,
+            );
 
             Some(())
         }
@@ -409,7 +426,8 @@ impl ServerListRequest {
             self.released()?;
 
             Some(sys::SteamAPI_ISteamMatchmakingServers_IsRefreshing(
-                self.mms, self.h_req,
+                self.mms.get(),
+                self.h_req.get(),
             ))
         }
     }
@@ -473,32 +491,22 @@ impl<Manager> MatchmakingServers<Manager> {
     /// # Arguments
     ///
     /// * app_id: The app to request the server list of.
-    pub fn lan_server_list<ID: Into<AppId>>(
-        &self,
-        app_id: ID,
-        callbacks: ServerListCallbacks,
-    ) -> Arc<Mutex<ServerListRequest>> {
+    pub fn lan_server_list<ID: Into<AppId>>(&self, app_id: ID, callbacks: ServerListCallbacks) {
         unsafe {
             let app_id = app_id.into().0;
 
             let callbacks = create_serverlist(callbacks);
 
-            let request_arc = ServerListRequest::get(callbacks);
-            let mut request = request_arc.lock().unwrap();
+            let request = ServerListRequest::get_unchecked(callbacks);
+            request.mms.set(self.mms);
+            request.real.set(callbacks);
 
             let handle = sys::SteamAPI_ISteamMatchmakingServers_RequestLANServerList(
                 self.mms,
                 app_id,
                 callbacks.cast(),
             );
-
-            request.mms = self.mms;
-            request.real = callbacks;
-            request.h_req = handle;
-
-            drop(request);
-
-            request_arc
+            request.h_req.set(handle);
         }
     }
 
@@ -529,7 +537,7 @@ fn test_internet_servers() {
     let data3 = std::rc::Rc::clone(&data);
     let callbacks = ServerListCallbacks::new(
         Box::new(move |list, server| {
-            let details = list.lock().unwrap().get_server_details(server).unwrap();
+            let details = list.get_server_details(server).unwrap();
             println!("{} : {}", details.server_name, details.map);
             *data.lock().unwrap() += 1;
         }),
@@ -537,7 +545,7 @@ fn test_internet_servers() {
             *data2.lock().unwrap() += 1;
         }),
         Box::new(move |list, _response| {
-            list.lock().unwrap().release();
+            list.release();
             println!("{}", data3.lock().unwrap());
         }),
     );
