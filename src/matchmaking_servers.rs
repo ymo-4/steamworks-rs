@@ -520,6 +520,8 @@ impl<Manager> MatchmakingServers<Manager> {
     );
 }
 
+unsafe impl Send for ServerListRequest {}
+
 #[test]
 fn test_internet_servers() {
     let (client, single) = Client::init_app(304930).unwrap();
