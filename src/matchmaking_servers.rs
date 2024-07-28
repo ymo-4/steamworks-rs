@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::net::Ipv4Addr;
 use std::ptr;
 use std::rc::Rc;
@@ -273,20 +273,23 @@ matchmaking_servers_callback!(
                 released: Cell::new(false),
                 mms: Cell::new(ptr::null_mut()),
                 real: Cell::new(ptr::null_mut()),
-                called_in: Cell::new(CalledIn::None),
             })
         }
     );
     responded({}): (
-        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request, CalledIn::Responded) },
+        request: sys::HServerListRequest => &RServerListRequest where {
+            &RServerListRequest(ServerListRequest::get(_self, request))
+        },
         server: i32 => i32 where {server}
     ),
     failed({}): (
-        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request, CalledIn::Failed) },
+        request: sys::HServerListRequest => &RServerListRequest where {
+            &RServerListRequest(ServerListRequest::get(_self, request))
+        },
         server: i32 => i32 where {server}
     ),
     refresh_complete({ history_prefree(_self) }): (
-        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request, CalledIn::RefreshComplete) },
+        request: sys::HServerListRequest => &ServerListRequest where { &*ServerListRequest::get(_self, request) },
         response: ServerResponse => ServerResponse where {response}
     )
 );
@@ -309,64 +312,17 @@ pub enum ServerResponse {
     NoServersListedOnMasterServer = 2,
 }
 
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-enum CalledIn {
-    Responded,
-    Failed,
-    RefreshComplete,
-
-    None,
-}
-
-impl CalledIn {
-    /// ```no_rust
-    /// Responded, Failed -> true
-    /// RefreshComplete -> false
-    /// None -> panic!
-    /// ```
-    fn is_default(&self) -> bool {
-        let val = *self;
-        if val == Self::Responded || val == Self::Failed {
-            true
-        } else if val == Self::RefreshComplete {
-            false
-        } else {
-            panic!("Should never be called on None. Go to github and make an issue!")
-        }
-    }
-}
-
 pub struct ServerListRequest {
     pub(self) released: Cell<bool>,
     pub(self) h_req: Cell<sys::HServerListRequest>,
     pub(self) mms: Cell<*mut sys::ISteamMatchmakingServers>,
     pub(self) real: Cell<*mut ServerListCallbacksReal>,
-    pub(self) called_in: Cell<CalledIn>,
 }
 
-impl ServerListRequest {
-    pub(self) unsafe fn get_unchecked(_self: *mut ServerListCallbacksReal) -> Rc<Self> {
-        let rust_callbacks = &*(*_self).rust_callbacks;
-        Rc::clone(&rust_callbacks.req)
-    }
+/// `release` method accessor
+pub struct RServerListRequest(pub(self) Rc<ServerListRequest>);
 
-    pub(self) unsafe fn get(
-        _self: *mut ServerListCallbacksReal,
-        request: sys::HServerListRequest,
-        called_in: CalledIn,
-    ) -> Rc<Self> {
-        let rc = Self::get_unchecked(_self);
-        rc.called_in.set(called_in);
-
-        // In case callback is called faster then function set h_req.
-        // Just in case, chance of that is very low.
-        if rc.h_req.get().is_null() {
-            rc.h_req.set(request);
-        }
-
-        rc
-    }
-
+impl RServerListRequest {
     /// # Usage
     ///
     /// Cancels any pending query on it if there's a pending
@@ -385,12 +341,40 @@ impl ServerListRequest {
     pub fn release(&self) -> Result<(), ()> {
         unsafe {
             self.released()?;
-            if self.called_in.get().is_default() {
-                self.release_unchecked();
-            }
+            self.release_unchecked();
 
             Ok(())
         }
+    }
+}
+
+impl std::ops::Deref for RServerListRequest {
+    type Target = ServerListRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl ServerListRequest {
+    pub(self) unsafe fn get_unchecked(_self: *mut ServerListCallbacksReal) -> Rc<Self> {
+        let rust_callbacks = &*(*_self).rust_callbacks;
+        Rc::clone(&rust_callbacks.req)
+    }
+
+    pub(self) unsafe fn get(
+        _self: *mut ServerListCallbacksReal,
+        request: sys::HServerListRequest,
+    ) -> Rc<Self> {
+        let rc = Self::get_unchecked(_self);
+
+        // In case callback is called faster then function set h_req.
+        // Just in case, chance of that is very low.
+        if rc.h_req.get().is_null() {
+            rc.h_req.set(request);
+        }
+
+        rc
     }
 
     pub(self) unsafe fn release_unchecked(&self) {
@@ -580,7 +564,7 @@ fn test_internet_servers() {
             println!("failed");
             *data2.lock().unwrap() += 1;
         }),
-        Box::new(move |list, _response| {
+        Box::new(move |_list, _response| {
             println!("{}", data3.lock().unwrap());
         }),
     );
