@@ -375,14 +375,21 @@ impl ServerListRequest {
     /// callback will not be posted when request is released.
     ///
     /// Further using methods on this request after `release`
-    /// called will always result in `None`
-    pub fn release(&self) {
+    /// called will always result in `Err`
+    ///
+    /// Do nothing when called inside a `refresh_completed`
+    ///
+    /// # Errors
+    ///
+    /// `Err` if called on released request
+    pub fn release(&self) -> Result<(), ()> {
         unsafe {
-            if self.released.get() || !self.called_in.get().is_default() {
-                return;
+            self.released()?;
+            if self.called_in.get().is_default() {
+                self.release_unchecked();
             }
 
-            self.release_unchecked();
+            Ok(())
         }
     }
 
@@ -393,22 +400,22 @@ impl ServerListRequest {
         free_serverlist(self.real.get());
     }
 
-    fn released(&self) -> Option<()> {
+    fn released(&self) -> Result<(), ()> {
         if self.released.get() {
-            None
+            Err(())
         } else {
-            Some(())
+            Ok(())
         }
     }
 
     /// # Errors
     ///
-    /// None if called on the released request
-    pub fn get_server_count(&self) -> Option<i32> {
+    /// Err if called on the released request
+    pub fn get_server_count(&self) -> Result<i32, ()> {
         unsafe {
             self.released()?;
 
-            Some(sys::SteamAPI_ISteamMatchmakingServers_GetServerCount(
+            Ok(sys::SteamAPI_ISteamMatchmakingServers_GetServerCount(
                 self.mms.get(),
                 self.h_req.get(),
             ))
@@ -417,8 +424,8 @@ impl ServerListRequest {
 
     /// # Errors
     ///
-    /// None if called on the released request
-    pub fn get_server_details(&self, server: i32) -> Option<GameServerItem> {
+    /// Err if called on the released request
+    pub fn get_server_details(&self, server: i32) -> Result<GameServerItem, ()> {
         unsafe {
             self.released()?;
 
@@ -429,31 +436,31 @@ impl ServerListRequest {
                 server,
             );
 
-            Some(GameServerItem::from_ptr(server_item))
+            Ok(GameServerItem::from_ptr(server_item))
         }
     }
 
     /// # Errors
     ///
-    /// None if called on the released request
-    pub fn refresh_query(&self) -> Option<()> {
+    /// Err if called on the released request
+    pub fn refresh_query(&self) -> Result<(), ()> {
         unsafe {
             self.released()?;
 
             sys::SteamAPI_ISteamMatchmakingServers_RefreshQuery(self.mms.get(), self.h_req.get());
 
-            Some(())
+            Ok(())
         }
     }
 
     /// # Errors
     ///
-    /// None if called on the released request
-    pub fn is_refreshing(&self) -> Option<bool> {
+    /// Err if called on the released request
+    pub fn is_refreshing(&self) -> Result<bool, ()> {
         unsafe {
             self.released()?;
 
-            Some(sys::SteamAPI_ISteamMatchmakingServers_IsRefreshing(
+            Ok(sys::SteamAPI_ISteamMatchmakingServers_IsRefreshing(
                 self.mms.get(),
                 self.h_req.get(),
             ))
