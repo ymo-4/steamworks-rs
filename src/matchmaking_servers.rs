@@ -449,23 +449,6 @@ impl ServerListRequest {
     /// # Errors
     ///
     /// None if called on the released request
-    pub fn refresh_server(&self, server: i32) -> Option<()> {
-        unsafe {
-            self.released()?;
-
-            sys::SteamAPI_ISteamMatchmakingServers_RefreshServer(
-                self.mms.get(),
-                self.h_req.get(),
-                server,
-            );
-
-            Some(())
-        }
-    }
-
-    /// # Errors
-    ///
-    /// None if called on the released request
     pub fn is_refreshing(&self) -> Option<bool> {
         unsafe {
             self.released()?;
